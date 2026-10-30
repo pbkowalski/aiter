@@ -30,6 +30,13 @@ from .quant import per_1x32_mx_quant
 __all__ = ["MegaMoEV2"]
 
 
+_FUSED_SMALL_M_PROFILES = {
+    # (world_size, model_dim, inter_dim, experts, topk, quant, swiglu_limit)
+    (8, 6144, 2048, 384, 8, "a8w4", 0.0),  # MiMo-V2.6
+    (8, 7168, 3072, 384, 6, "a8w4", 10.0),  # DeepSeek-V4-Pro
+}
+
+
 def _small_m_mtprs(mtprs) -> tuple[int, ...]:
     """Small-input runtime MTPRs; each is an independent single-kernel instance."""
     mtprs = sorted({int(m) for m in mtprs})
@@ -88,17 +95,22 @@ def small_m_eligible(
     fanout_masks: tuple[int, ...] = (),
     act: str = "silu",
 ) -> bool:
-    """Whether the small-input path supports this layout (EP8 DeepSeek-V4 a8w4)."""
+    """Whether the small-input path supports a validated EP8 A8W4 profile."""
+    profile = (
+        world_size,
+        model_dim,
+        inter_dim,
+        experts,
+        topk,
+        quant,
+        float(swiglu_limit),
+    )
     return (
         enabled
         and arch.split(":", 1)[0] == "gfx950"
-        and world_size == 8
-        and model_dim == 7168
-        and inter_dim == 3072
-        and experts == 384
-        and topk == 6
-        and quant == "a8w4"
-        and swiglu_limit == 10.0
+        and experts % world_size == 0
+        and experts // world_size == 48
+        and profile in _FUSED_SMALL_M_PROFILES
         and act == "silu"
         and not fanout_masks
     )

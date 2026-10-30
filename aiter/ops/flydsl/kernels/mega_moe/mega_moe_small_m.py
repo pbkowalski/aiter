@@ -1428,6 +1428,11 @@ def small_m_config(
         model_dim=model_dim,
         inter_dim=inter_dim,
     )
+    bucket = nearest_token_bucket(max(tokens, 1))
+    if (model_dim, inter_dim, experts_per_rank, bucket) == (6144, 2048, 48, 128):
+        config = replace(
+            config, stage1=replace(config.stage1, num_dispatch_cu=160)
+        )
     if config.stage2.persist:
         # Buckets >= 128 select a persistent GEMM2; the kernel runs GEMM2 in its own grid with NT B loads.
         config = replace(
@@ -1436,7 +1441,7 @@ def small_m_config(
                 config.stage2, block_n=256, persist=False, persist_cu=0, use_nt=True
             ),
         )
-    if nearest_token_bucket(max(tokens, 1)) >= _BM64_MIN_BUCKET:
+    if bucket >= _BM64_MIN_BUCKET:
         # 64-row expert tiles: at ~35+ rows per expert a 32-row tile splits every expert in two and streams its
         # weights twice.
         config = replace(

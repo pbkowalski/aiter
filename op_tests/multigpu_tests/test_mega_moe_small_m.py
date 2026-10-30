@@ -2,8 +2,8 @@
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 """Small-input path of MegaMoEV2 (forward_small_m).
 
-One MegaMoEV2 built at MTPR 8192 with small-input runtimes next to it
-(small_m_mtprs, default 256 and 512). Checks accuracy against an fp32
+One MegaMoEV2 built at the requested main-path MTPR with small-input runtimes
+next to it. Checks accuracy against an fp32
 reference and the main path (uneven, idle, padded ranks), per-layer weight
 rebinding with interleaved main calls, CUDA graph replay, and paired timing.
 
@@ -73,7 +73,7 @@ def _rank_case(tokens_per_rank, rank, x, w, ids, experts, pad_rows=0):
 
 def run(args):
     rank, world, device = _setup_dist()
-    net = NETWORKS["v4_pro"]
+    net = NETWORKS[args.network]
     experts, topk = net["experts"], net["topk"]
     local_experts = experts // world
     try:
@@ -487,6 +487,7 @@ def main():
         print(f"[SKIP] the small- and large-input paths need gfx950, got {get_gfx()}")
         return
     p = argparse.ArgumentParser()
+    p.add_argument("--network", choices=NETWORKS, default="v4_pro")
     p.add_argument("--mtpr", type=int, default=8192)
     p.add_argument("--slots", type=int, default=61)
     p.add_argument("--seed", type=int, default=7)

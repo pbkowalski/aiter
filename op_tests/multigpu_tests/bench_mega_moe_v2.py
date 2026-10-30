@@ -230,6 +230,7 @@ def main():
     parser.add_argument("--inter-dim", type=int, default=INTER_DIM)
     parser.add_argument("--experts", type=int, default=EXPERTS)
     parser.add_argument("--topk", type=int, default=TOPK)
+    parser.add_argument("--swiglu-limit", type=float, default=SWIGLU_LIMIT)
     parser.add_argument("--iters", type=int, default=10)
     parser.add_argument(
         "--route",
@@ -344,7 +345,7 @@ def main():
         w2=w2,
         w2_scale=w2_scale,
         max_tok_per_rank=args.mtpr,
-        swiglu_limit=SWIGLU_LIMIT,
+        swiglu_limit=args.swiglu_limit,
     )
     default_select_config = mega._select_config
     variant_select_config = None
@@ -461,7 +462,7 @@ def main():
             w2_scale=w2_scale,
             a1_scale=None,
             dtype=torch.bfloat16,
-            swiglu_limit=SWIGLU_LIMIT,
+            swiglu_limit=args.swiglu_limit,
             gate_mode=GateMode.INTERLEAVE.value,
         )
         holders["mori"] = mori_op.combine(

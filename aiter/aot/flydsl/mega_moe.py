@@ -81,6 +81,10 @@ TOPK = 6
 MODEL_DIM = 7168
 INTER_DIM = 3072
 SWIGLU_LIMIT = 10.0
+MIMO_TOPK = 8
+MIMO_MODEL_DIM = 6144
+MIMO_INTER_DIM = 2048
+MIMO_EXPERTS_PER_RANKS = (48,)
 # Instances of this MTPR also build the opt-in small- and large-input paths.
 FUSED_PATHS_MTPR = 8192
 FUSED_PATHS_ENV = {"AITER_MEGA_SMALL_M": "1", "AITER_MEGA_LARGE_M": "1"}
@@ -164,6 +168,16 @@ def production_jobs(
         act=K3_ACT,
         situ_beta=K3_SITU_BETA,
         situ_linear_beta=K3_SITU_LINEAR_BETA,
+    )
+    jobs += default_jobs(
+        (FUSED_PATHS_MTPR,),
+        MIMO_EXPERTS_PER_RANKS,
+        quants=("a8w4",),
+        world_size=world_size,
+        topk=MIMO_TOPK,
+        model_dim=MIMO_MODEL_DIM,
+        inter_dim=MIMO_INTER_DIM,
+        swiglu_limit=0.0,
     )
     return jobs
 
@@ -252,6 +266,12 @@ def compile_one_config(**job):
                 quant=job["quant"],
                 max_tok_per_rank=job["mtpr"],
                 swiglu_limit=job["swiglu_limit"],
+                small_m_mtprs=(
+                    (128, 256)
+                    if (job["model_dim"], job["inter_dim"], job["topk"])
+                    == (MIMO_MODEL_DIM, MIMO_INTER_DIM, MIMO_TOPK)
+                    else (256, 512)
+                ),
                 act=job["act"],
                 situ_beta=job["situ_beta"],
                 situ_linear_beta=job["situ_linear_beta"],
