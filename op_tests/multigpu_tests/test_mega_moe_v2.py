@@ -22,6 +22,13 @@ from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4
 from aiter.utility import fp4_utils
 
 NETWORKS = {
+    "mimo_v2": {
+        "model_dim": 6144,
+        "inter_dim": 2048,
+        "experts": 384,
+        "topk": 8,
+        "swiglu_limit": 0.0,
+    },
     # swiglu_limit 0.0 exercises the operator's default, unclamped SwiGLU.
     "glm52": {
         "model_dim": 6144,
