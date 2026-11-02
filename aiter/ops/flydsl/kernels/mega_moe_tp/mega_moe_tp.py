@@ -86,6 +86,70 @@ _ALIGN = 256
 _OPEN: dict[bytes, list] = {}
 
 
+class _DLDevice(ctypes.Structure):
+    _fields_ = [("device_type", ctypes.c_int), ("device_id", ctypes.c_int)]
+
+
+class _DLDataType(ctypes.Structure):
+    _fields_ = [
+        ("code", ctypes.c_uint8),
+        ("bits", ctypes.c_uint8),
+        ("lanes", ctypes.c_uint16),
+    ]
+
+
+class _DLTensor(ctypes.Structure):
+    _fields_ = [
+        ("data", ctypes.c_void_p),
+        ("device", _DLDevice),
+        ("ndim", ctypes.c_int),
+        ("dtype", _DLDataType),
+        ("shape", ctypes.POINTER(ctypes.c_int64)),
+        ("strides", ctypes.POINTER(ctypes.c_int64)),
+        ("byte_offset", ctypes.c_uint64),
+    ]
+
+
+class _DLManagedTensor(ctypes.Structure):
+    pass
+
+
+_DLDeleter = ctypes.CFUNCTYPE(None, ctypes.POINTER(_DLManagedTensor))
+_DLManagedTensor._fields_ = [
+    ("dl_tensor", _DLTensor),
+    ("manager_ctx", ctypes.c_void_p),
+    ("deleter", _DLDeleter),
+]
+
+
+@_DLDeleter
+def _noop_dlpack_deleter(_managed):
+    return
+
+
+def _torch_uint8_from_rocm_ptr(ptr: int, size: int, device: int):
+    shape = (ctypes.c_int64 * 1)(size)
+    managed = _DLManagedTensor(
+        _DLTensor(
+            ctypes.c_void_p(ptr),
+            _DLDevice(10, device),
+            1,
+            _DLDataType(1, 8, 1),
+            shape,
+            None,
+            0,
+        ),
+        None,
+        _noop_dlpack_deleter,
+    )
+    new_capsule = ctypes.pythonapi.PyCapsule_New
+    new_capsule.restype = ctypes.py_object
+    new_capsule.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+    capsule = new_capsule(ctypes.addressof(managed), b"dltensor", None)
+    tensor = torch.utils.dlpack.from_dlpack(capsule)
+    return tensor, (managed, shape)
+
+
 def _allocation_base(ptr: int) -> int:
     hip = _Ipc._load_hip()
     hip.hipMemGetAddressRange.argtypes = [
@@ -157,6 +221,9 @@ class SymmetricArena:
         self._slices: dict[str, _Slice] = {}
         self._cursor = 0
         self._storage: torch.Tensor | None = None
+        self._pool = None
+        self._raw_ptr = 0
+        self._dlpack_owner = None
         self._base_ptrs: tuple[int, ...] = ()
         self._opened: list[bytes] = []
 
@@ -175,8 +242,23 @@ class SymmetricArena:
         """Collective: allocate and map every rank's arena (raises on every rank if any
         rank fails)."""
         total = ceildiv(self._cursor, _ALIGN) * _ALIGN
-        with _no_expandable_segments():
-            self._storage = torch.zeros(total, dtype=torch.uint8, device=self.device)
+        raw_arena = os.getenv("AITER_MEGAMOE_TP_RAW_ARENA") == "1"
+        if raw_arena:
+            self._raw_ptr = _Ipc.alloc_uncached(total)
+            self._storage, self._dlpack_owner = _torch_uint8_from_rocm_ptr(
+                self._raw_ptr,
+                total,
+                self.device.index
+                if self.device.index is not None
+                else torch.cuda.current_device(),
+            )
+        else:
+            with _no_expandable_segments():
+                self._pool = torch.cuda.MemPool()
+                with torch.cuda.use_mem_pool(self._pool, device=self.device):
+                    self._storage = torch.zeros(
+                        total, dtype=torch.uint8, device=self.device
+                    )
         base_ptr = int(self._storage.data_ptr())
         for s in self._slices.values():
             s.local = self._storage[s.offset : s.offset + s.nbytes].view(s.dtype)
@@ -184,7 +266,11 @@ class SymmetricArena:
         try:
             with torch.cuda.device(self.device):
                 handle = _Ipc.get_mem_handle_bytes(base_ptr)
-                payload = (handle, base_ptr - _allocation_base(base_ptr), total)
+                payload = (
+                    handle,
+                    0 if raw_arena else base_ptr - _allocation_base(base_ptr),
+                    total,
+                )
             err = ""
         except RuntimeError as exc:
             payload, err = None, str(exc)
@@ -224,6 +310,13 @@ class SymmetricArena:
                 _ipc_close(handle)
             self._opened = []
             self._base_ptrs = ()
+        if self._raw_ptr:
+            for s in self._slices.values():
+                s.local = None
+            self._storage = None
+            self._dlpack_owner = None
+            _Ipc.free_device_mem(self._raw_ptr)
+            self._raw_ptr = 0
 
     def __del__(self):
         try:
