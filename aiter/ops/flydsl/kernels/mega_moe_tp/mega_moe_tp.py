@@ -150,6 +150,25 @@ def _torch_uint8_from_rocm_ptr(ptr: int, size: int, device: int):
     return tensor, (managed, shape)
 
 
+def _hip_malloc(size: int) -> int:
+    hip = _Ipc._load_hip()
+    hip.hipMalloc.restype = ctypes.c_int
+    hip.hipMalloc.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_size_t,
+    ]
+    pointer = ctypes.c_void_p()
+    _Ipc._hip_check(
+        hip.hipMalloc(ctypes.byref(pointer), ctypes.c_size_t(size)),
+        what="hipMalloc",
+    )
+    _Ipc._hip_check(
+        hip.hipMemset(pointer, 0, ctypes.c_size_t(size)),
+        what="hipMemset",
+    )
+    return int(pointer.value)
+
+
 def _allocation_base(ptr: int) -> int:
     hip = _Ipc._load_hip()
     hip.hipMemGetAddressRange.argtypes = [
@@ -242,9 +261,13 @@ class SymmetricArena:
         """Collective: allocate and map every rank's arena (raises on every rank if any
         rank fails)."""
         total = ceildiv(self._cursor, _ALIGN) * _ALIGN
-        raw_arena = os.getenv("AITER_MEGAMOE_TP_RAW_ARENA") == "1"
+        raw_arena = os.getenv("AITER_MEGAMOE_TP_RAW_ARENA", "")
         if raw_arena:
-            self._raw_ptr = _Ipc.alloc_uncached(total)
+            self._raw_ptr = (
+                _hip_malloc(total)
+                if raw_arena == "hipmalloc"
+                else _Ipc.alloc_uncached(total)
+            )
             self._storage, self._dlpack_owner = _torch_uint8_from_rocm_ptr(
                 self._raw_ptr,
                 total,
