@@ -243,6 +243,7 @@ class SymmetricArena:
         self._pool = None
         self._raw_ptr = 0
         self._dlpack_owner = None
+        self._torch_ipc_meta = None
         self._base_ptrs: tuple[int, ...] = ()
         self._opened: list[bytes] = []
 
@@ -262,7 +263,13 @@ class SymmetricArena:
         rank fails)."""
         total = ceildiv(self._cursor, _ALIGN) * _ALIGN
         raw_arena = os.getenv("AITER_MEGAMOE_TP_RAW_ARENA", "")
-        if raw_arena:
+        sglang_arena = os.getenv("AITER_MEGAMOE_TP_SGLANG_IPC") == "1"
+        if sglang_arena:
+            import sgl_kernel.allreduce as custom_all_reduce
+
+            self._storage = custom_all_reduce.allocate_meta_buffer(total)
+            self._storage.zero_()
+        elif raw_arena:
             self._raw_ptr = (
                 _hip_malloc(total)
                 if raw_arena == "hipmalloc"
@@ -277,23 +284,48 @@ class SymmetricArena:
             )
         else:
             with _no_expandable_segments():
-                self._pool = torch.cuda.MemPool()
-                with torch.cuda.use_mem_pool(self._pool, device=self.device):
-                    self._storage = torch.zeros(
-                        total, dtype=torch.uint8, device=self.device
-                    )
+                self._storage = torch.zeros(
+                    total, dtype=torch.uint8, device=self.device
+                )
         base_ptr = int(self._storage.data_ptr())
         for s in self._slices.values():
             s.local = self._storage[s.offset : s.offset + s.nbytes].view(s.dtype)
             s.local = s.local.view(s.shape)
         try:
             with torch.cuda.device(self.device):
-                handle = _Ipc.get_mem_handle_bytes(base_ptr)
+                if os.getenv("AITER_MEGAMOE_TP_SGLANG_IPC") == "1":
+                    import sgl_kernel.allreduce as custom_all_reduce
+
+                    handle = bytes(
+                        custom_all_reduce.get_meta_buffer_ipc_handle(self._storage)
+                    )
+                    offset = 0
+                elif os.getenv("AITER_MEGAMOE_TP_TORCH_IPC") == "1":
+                    self._torch_ipc_meta = (
+                        self._storage.untyped_storage()._share_cuda_()
+                    )
+                    handle = bytes(self._torch_ipc_meta[1])
+                    offset = int(self._torch_ipc_meta[3])
+                else:
+                    handle = _Ipc.get_mem_handle_bytes(base_ptr)
+                    offset = (
+                        0
+                        if raw_arena
+                        else base_ptr - _allocation_base(base_ptr)
+                    )
                 payload = (
                     handle,
-                    0 if raw_arena else base_ptr - _allocation_base(base_ptr),
+                    offset,
                     total,
                 )
+                if os.getenv("AITER_MEGAMOE_TP_IPC_DEBUG") == "1":
+                    print(
+                        "MEGAMOE_TP_IPC "
+                        f"rank={self.rank} base_ptr={base_ptr:#x} "
+                        f"allocation_base={_allocation_base(base_ptr):#x} "
+                        f"offset={offset} total={total}",
+                        flush=True,
+                    )
             err = ""
         except RuntimeError as exc:
             payload, err = None, str(exc)
@@ -322,6 +354,12 @@ class SymmetricArena:
             self.close()
             raise RuntimeError(f"SymmetricArena: mapping failed on ranks {bad}")
         self._base_ptrs = tuple(ptrs)
+        if os.getenv("AITER_MEGAMOE_TP_IPC_DEBUG") == "1":
+            print(
+                "MEGAMOE_TP_IPC_PTRS "
+                f"rank={self.rank} ptrs={[hex(ptr) for ptr in ptrs]}",
+                flush=True,
+            )
         dist.barrier(group=self.group)
         return self
 
